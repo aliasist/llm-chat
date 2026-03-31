@@ -4,9 +4,12 @@
  * Uses Groq API — key stored as Cloudflare Worker secret (never in browser)
  */
 
+import { logChat, logUsage } from "./analytics";
+
 export interface Env {
   GROQ_API_KEY: string;
   ASSETS: Fetcher;
+  ANALYTICS: D1Database;
 }
 
 const GROQ_MODEL = "llama-3.3-70b-versatile";
@@ -32,7 +35,7 @@ const CORS = {
 };
 
 export default {
-  async fetch(request: Request, env: Env): Promise<Response> {
+  async fetch(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
     const url = new URL(request.url);
 
     // CORS preflight
@@ -42,7 +45,7 @@ export default {
 
     // POST /api/chat
     if (url.pathname === "/api/chat" && request.method === "POST") {
-      return handleChat(request, env);
+      return handleChat(request, env, ctx);
     }
 
     // Health check
@@ -61,7 +64,7 @@ export default {
   },
 };
 
-async function handleChat(request: Request, env: Env): Promise<Response> {
+async function handleChat(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
   try {
     const { messages = [] } = await request.json() as {
       messages: Array<{ role: string; content: string }>;
@@ -95,6 +98,13 @@ async function handleChat(request: Request, env: Env): Promise<Response> {
     }
 
     const reply = data.choices?.[0]?.message?.content ?? "// signal_lost";
+    const userMsg = messages.filter((m) => m.role !== "system").slice(-1)[0]?.content ?? "";
+
+    // Fire-and-forget: log conversation to aliasist-analytics D1
+    if (env.ANALYTICS) {
+      ctx.waitUntil(logChat(env.ANALYTICS, "llm-chat", userMsg, reply, GROQ_MODEL));
+      ctx.waitUntil(logUsage(env.ANALYTICS, "llm-chat", "ai-chat", "complete"));
+    }
 
     return new Response(JSON.stringify({ response: reply }), {
       headers: { ...CORS, "Content-Type": "application/json" },
