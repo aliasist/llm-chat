@@ -1,100 +1,110 @@
 /**
  * Aliasist LLM Chat Worker
- * Powers the AI chat widget on aliasist.com via Cloudflare Workers AI.
- * API key never reaches the browser — all inference runs server-side.
+ * Powers the AI chat widget on aliasist.com
+ * Uses Groq API — key stored as Cloudflare Worker secret (never in browser)
  */
-import { Env, ChatMessage } from "./types";
 
-const MODEL_ID = "@cf/meta/llama-3.1-8b-instruct-fp8";
+export interface Env {
+  GROQ_API_KEY: string;
+  ASSETS: Fetcher;
+}
 
-const ALIASIST_SYSTEM_PROMPT = `You are the Aliasist AI — the intelligent assistant embedded in aliasist.com, the developer portfolio and project hub of Blake, an AI security developer and CS student.
+const GROQ_MODEL = "llama-3.3-70b-versatile";
+const GROQ_URL = "https://api.groq.com/openai/v1/chat/completions";
+
+const ALIASIST_SYSTEM = `You are the Aliasist AI — the intelligent assistant embedded in aliasist.com, the developer portfolio and project hub of Blake, an AI security developer and CS student.
 
 About Aliasist:
 - Tagline: "Adversarial by Nature. Defensive by Design."
 - Focus: AI security (AiSec), adversarial machine learning, open-source security tooling
-- Projects: Aliasist-Files-Abductor (file automation CLI tool), DataSist (AI data center intelligence platform with 35+ facilities tracked), more in development
-- App suite uses the "-sist" naming convention: FileSist, DataSist, etc.
-- Stack: Python, JavaScript, React, Vite, Node.js, Cloudflare Workers
+- Projects: Aliasist-Files-Abductor (file automation CLI tool), DataSist (AI data center intelligence platform), PulseSist (stock market intelligence) — more in development
+- App suite uses the "-sist" naming convention
+- Stack: Python, JavaScript, React, Vite, Cloudflare Workers, D1
 - Contact: dev@aliasist.com | github.com/aliasist
-- Blake is self-taught, now formally studying Computer Information Systems, building toward AI security specialization (AiSec)
+- Blake is self-taught, now formally studying Computer Information Systems, building toward AI security specialization
 
-Your role: Answer questions about Aliasist, Blake's work, AI security, and tech topics. Be concise, technical, and direct. Keep responses under 3 paragraphs. Use the brand voice — professional, slightly alien-themed but grounded. Do not hallucinate project details not listed above.`;
+Your role: Answer questions about Aliasist, Blake's work, AI security, and tech topics. Be concise, technical, and direct. Keep responses under 3 paragraphs. Professional, slightly alien-themed brand voice. Do not hallucinate project details.`;
 
-// CORS headers — allow calls from aliasist.com and local dev
-const CORS_HEADERS = {
-	"Access-Control-Allow-Origin": "*",
-	"Access-Control-Allow-Methods": "POST, OPTIONS",
-	"Access-Control-Allow-Headers": "Content-Type",
+const CORS = {
+  "Access-Control-Allow-Origin": "*",
+  "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
+  "Access-Control-Allow-Headers": "Content-Type",
 };
 
 export default {
-	async fetch(
-		request: Request,
-		env: Env,
-		ctx: ExecutionContext,
-	): Promise<Response> {
-		const url = new URL(request.url);
+  async fetch(request: Request, env: Env): Promise<Response> {
+    const url = new URL(request.url);
 
-		// Handle CORS preflight
-		if (request.method === "OPTIONS") {
-			return new Response(null, { status: 204, headers: CORS_HEADERS });
-		}
+    // CORS preflight
+    if (request.method === "OPTIONS") {
+      return new Response(null, { status: 204, headers: CORS });
+    }
 
-		// Serve static assets for non-API routes
-		if (url.pathname === "/" || !url.pathname.startsWith("/api/")) {
-			return env.ASSETS.fetch(request);
-		}
+    // POST /api/chat
+    if (url.pathname === "/api/chat" && request.method === "POST") {
+      return handleChat(request, env);
+    }
 
-		// POST /api/chat
-		if (url.pathname === "/api/chat") {
-			if (request.method === "POST") {
-				return handleChatRequest(request, env);
-			}
-			return new Response("Method not allowed", { status: 405, headers: CORS_HEADERS });
-		}
+    // Health check
+    if (url.pathname === "/api/health") {
+      return new Response(JSON.stringify({ status: "ok" }), {
+        headers: { ...CORS, "Content-Type": "application/json" },
+      });
+    }
 
-		return new Response("Not found", { status: 404 });
-	},
-} satisfies ExportedHandler<Env>;
+    // Static assets
+    if (url.pathname === "/" || !url.pathname.startsWith("/api/")) {
+      return env.ASSETS.fetch(request);
+    }
 
-async function handleChatRequest(
-	request: Request,
-	env: Env,
-): Promise<Response> {
-	try {
-		const { messages = [] } = (await request.json()) as {
-			messages: ChatMessage[];
-		};
+    return new Response("Not found", { status: 404 });
+  },
+};
 
-		// Always inject Aliasist system prompt — override any client-provided one
-		const filtered = messages.filter((m) => m.role !== "system");
-		filtered.unshift({ role: "system", content: ALIASIST_SYSTEM_PROMPT });
+async function handleChat(request: Request, env: Env): Promise<Response> {
+  try {
+    const { messages = [] } = await request.json() as {
+      messages: Array<{ role: string; content: string }>;
+    };
 
-		const stream = await env.AI.run(
-			MODEL_ID,
-			{
-				messages: filtered,
-				max_tokens: 512,
-				stream: true,
-			},
-		);
+    // Always use Aliasist system prompt
+    const filtered = messages.filter((m) => m.role !== "system");
+    filtered.unshift({ role: "system", content: ALIASIST_SYSTEM });
 
-		return new Response(stream, {
-			headers: {
-				...CORS_HEADERS,
-				"content-type": "text/event-stream; charset=utf-8",
-				"cache-control": "no-cache",
-				"connection": "keep-alive",
-			},
-		});
-	} catch (error) {
-		console.error("Chat error:", error);
-		return new Response(
-			JSON.stringify({ error: "Failed to process request" }),
-			{
-				status: 500,
-				headers: { ...CORS_HEADERS, "content-type": "application/json" },
-			},
-		);
-	}
+    const groqRes = await fetch(GROQ_URL, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "Authorization": `Bearer ${env.GROQ_API_KEY}`,
+      },
+      body: JSON.stringify({
+        model: GROQ_MODEL,
+        messages: filtered,
+        max_tokens: 512,
+        temperature: 0.7,
+      }),
+    });
+
+    const data = await groqRes.json() as {
+      choices?: Array<{ message?: { content?: string } }>;
+      error?: { message: string };
+    };
+
+    if (data.error) {
+      throw new Error(data.error.message);
+    }
+
+    const reply = data.choices?.[0]?.message?.content ?? "// signal_lost";
+
+    return new Response(JSON.stringify({ response: reply }), {
+      headers: { ...CORS, "Content-Type": "application/json" },
+    });
+
+  } catch (err) {
+    console.error("Chat error:", err);
+    return new Response(
+      JSON.stringify({ error: "Failed to process request" }),
+      { status: 500, headers: { ...CORS, "Content-Type": "application/json" } }
+    );
+  }
 }
