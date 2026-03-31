@@ -65,6 +65,14 @@ export default {
 };
 
 async function handleChat(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
+  // Guard — if key missing the worker will silently fail with a 401 from Groq
+  if (!env.GROQ_API_KEY) {
+    return new Response(
+      JSON.stringify({ error: "GROQ_API_KEY not configured. Run: wrangler secret put GROQ_API_KEY" }),
+      { status: 500, headers: { ...CORS, "Content-Type": "application/json" } }
+    );
+  }
+
   try {
     const { messages = [] } = await request.json() as {
       messages: Array<{ role: string; content: string }>;
