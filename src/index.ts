@@ -14,6 +14,27 @@ export interface Env {
   ANALYTICS: D1Database;
 }
 
+// — Sentry (Workers — lightweight fetch-based, no SDK needed)
+const SENTRY_DSN = "https://a4392f5f65eb0725f34d6c410f97e1b1@o4511142133760000.ingest.us.sentry.io/4511142165348352";
+async function captureError(err: unknown, context: string): Promise<void> {
+  try {
+    const msg = err instanceof Error ? err.message : String(err);
+    const [, key, host, projectId] = SENTRY_DSN.match(/https:\/\/([^@]+)@([^/]+)\/(.+)/) ?? [];
+    if (!key) return;
+    await fetch(`https://${host}/api/${projectId}/store/`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "X-Sentry-Auth": `Sentry sentry_version=7, sentry_key=${key}` },
+      body: JSON.stringify({
+        platform: "javascript", level: "error",
+        logger: `llm-chat.${context}`,
+        message: msg,
+        timestamp: new Date().toISOString(),
+        tags: { worker: "llm-chat", context },
+      }),
+    });
+  } catch { /* never let Sentry break the worker */ }
+}
+
 // — Claude
 const CLAUDE_MODEL = "claude-3-5-haiku-20241022"; // fast, cheap, great for chat
 const CLAUDE_URL   = "https://api.anthropic.com/v1/messages";
@@ -196,6 +217,7 @@ async function handleChat(request: Request, env: Env, ctx: ExecutionContext): Pr
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
     console.error("Chat error:", msg);
+    ctx.waitUntil(captureError(err, "handleChat"));
     return new Response(
       JSON.stringify({ error: msg }),
       { status: 500, headers: { ...CORS, "Content-Type": "application/json" } }
