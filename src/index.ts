@@ -73,6 +73,11 @@ export default {
       return handleChat(request, env, ctx);
     }
 
+    // POST /api/contact — contact form submission → saved to D1
+    if (url.pathname === "/api/contact" && request.method === "POST") {
+      return handleContact(request, env);
+    }
+
     if (url.pathname === "/api/health") {
       return new Response(JSON.stringify({
         status: "ok",
@@ -222,5 +227,46 @@ async function handleChat(request: Request, env: Env, ctx: ExecutionContext): Pr
       JSON.stringify({ error: msg }),
       { status: 500, headers: { ...CORS, "Content-Type": "application/json" } }
     );
+  }
+}
+
+async function handleContact(request: Request, env: Env): Promise<Response> {
+  try {
+    const body = await request.json() as { name?: string; email?: string; message?: string };
+    const { name, email, message } = body;
+
+    if (!name?.trim() || !email?.trim() || !message?.trim()) {
+      return new Response(JSON.stringify({ error: "name, email, and message are required" }), {
+        status: 400, headers: { ...CORS, "Content-Type": "application/json" },
+      });
+    }
+    if (name.length > 100 || email.length > 200 || message.length > 5000) {
+      return new Response(JSON.stringify({ error: "Input too long" }), {
+        status: 400, headers: { ...CORS, "Content-Type": "application/json" },
+      });
+    }
+    if (!/^[^@]+@[^@]+\.[^@]+$/.test(email)) {
+      return new Response(JSON.stringify({ error: "Invalid email" }), {
+        status: 400, headers: { ...CORS, "Content-Type": "application/json" },
+      });
+    }
+
+    const id = crypto.randomUUID();
+    const ts = Date.now();
+    const ip = request.headers.get("CF-Connecting-IP") ?? null;
+
+    if (env.ANALYTICS) {
+      await env.ANALYTICS.prepare(
+        "INSERT INTO contact_messages (id, name, email, message, ip, timestamp) VALUES (?, ?, ?, ?, ?, ?)"
+      ).bind(id, name.trim(), email.trim(), message.trim(), ip, ts).run();
+    }
+
+    return new Response(JSON.stringify({ ok: true, id }), {
+      headers: { ...CORS, "Content-Type": "application/json" },
+    });
+  } catch (err) {
+    return new Response(JSON.stringify({ error: "Failed to submit message" }), {
+      status: 500, headers: { ...CORS, "Content-Type": "application/json" },
+    });
   }
 }
