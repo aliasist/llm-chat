@@ -6,12 +6,14 @@
  */
 
 import { logChat, logUsage } from "./analytics";
+import { sendMetrics, sendLog, trackAIUsage } from "./datadog";
 
 export interface Env {
   ANTHROPIC_API_KEY: string;
   GROQ_API_KEY: string;
   ASSETS: Fetcher;
   ANALYTICS: D1Database;
+  DD_API_KEY?: string;
 }
 
 // — Sentry (Workers — lightweight fetch-based, no SDK needed)
@@ -70,12 +72,24 @@ export default {
     }
 
     if (url.pathname === "/api/chat" && request.method === "POST") {
-      return handleChat(request, env, ctx);
+      const _t = Date.now();
+      const res = await handleChat(request, env, ctx);
+      sendMetrics(env.DD_API_KEY, [
+        { metric: "aliasist.api.request", value: 1, tags: ["route:/api/chat","service:aliasist-llm","status:"+res.status] },
+        { metric: "aliasist.api.latency_ms", value: Date.now()-_t, type: "gauge", tags: ["route:/api/chat","service:aliasist-llm"] },
+      ]);
+      return res;
     }
 
     // POST /api/contact — contact form submission → saved to D1
     if (url.pathname === "/api/contact" && request.method === "POST") {
-      return handleContact(request, env);
+      const _t = Date.now();
+      const res = await handleContact(request, env);
+      sendMetrics(env.DD_API_KEY, [
+        { metric: "aliasist.api.request", value: 1, tags: ["route:/api/contact","service:aliasist-llm","status:"+res.status] },
+        { metric: "aliasist.api.latency_ms", value: Date.now()-_t, type: "gauge", tags: ["route:/api/contact","service:aliasist-llm"] },
+      ]);
+      return res;
     }
 
     if (url.pathname === "/api/health") {
@@ -214,6 +228,7 @@ async function handleChat(request: Request, env: Env, ctx: ExecutionContext): Pr
       ctx.waitUntil(logChat(env.ANALYTICS, "llm-chat", userMsg, reply, modelUsed));
       ctx.waitUntil(logUsage(env.ANALYTICS, "llm-chat", "ai-chat", "complete"));
     }
+    sendMetrics((env as any).DD_API_KEY, [{ metric: "aliasist.ai.call", value: 1, tags: ["provider:"+modelUsed.split("-")[0],"service:aliasist-llm","success:true"] }]);
 
     return new Response(JSON.stringify({ response: reply, model: modelUsed }), {
       headers: { ...CORS, "Content-Type": "application/json" },
